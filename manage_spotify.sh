@@ -3,8 +3,8 @@
 # manage_spotify.sh
 # Spotify Web Shortcut Manager — Raspberry Pi 4
 # Version: 1.5.6
-# Status: 🟡 Pending hardware test
-# Last updated: 2026-06-25
+# Status: 🟢 GOLD
+# Last updated: 2026-06-26
 #
 # Installs an optimized Chromium PWA shortcut to open.spotify.com.
 # No compilation. Uses pre-installed Chromium. RAM cache in /dev/shm.
