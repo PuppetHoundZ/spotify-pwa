@@ -2,13 +2,13 @@
 # =============================================================================
 # manage_spotify.sh
 # Spotify Web Shortcut Manager — Raspberry Pi 4
-# Version: 1.5.6
+# Version: 1.5.7
 # Status: 🟢 GOLD
-# Last updated: 2026-06-26
+# Last updated: 2026-11-01
 #
 # Installs an optimized Chromium PWA shortcut to open.spotify.com.
-# No compilation. Uses pre-installed Chromium. RAM cache in /dev/shm.
-# Embedded SVG icon. Works with free and Premium Spotify accounts.
+# No compilation. Uses pre-installed Chromium. RAM cache in /zram (if the
+# Pi-Apps "More RAM" app is installed) or /dev/shm. Embedded SVG icon. Works with free and Premium Spotify accounts.
 # This is the canonical preferred Spotify solution — lightweight and simple.
 #
 # Requirements:
@@ -26,7 +26,7 @@
 #
 # WHAT THIS SCRIPT DOES:
 #   Installs a Chromium PWA shortcut to open.spotify.com. No compilation.
-#   Uses pre-installed Chromium. RAM cache in /dev/shm. Embedded SVG icon.
+#   Uses pre-installed Chromium. RAM cache in /zram or /dev/shm. Embedded SVG icon.
 #   This is the canonical preferred Spotify solution — lightweight and simple.
 #   Modelled on Botspot's WhatsApp Pi-Apps install pattern.
 #   Ref: https://github.com/Botspot/pi-apps/blob/master/apps/WhatsApp/install
@@ -36,7 +36,8 @@
 #   /usr/local/share/applications/spotify-web.desktop  # desktop entry (sudo)
 #   ~/.local/share/icons/hicolor/scalable/apps/spotify-web.svg
 #   ~/.config/webapps/spotify-web/                      # isolated Chromium profile
-#   /dev/shm/spotify-web-cache/                         # RAM cache (volatile)
+#   /zram/spotify-web-cache-$USER/                      # RAM cache if More RAM zram is mounted
+#   /dev/shm/spotify-web-cache/                         # RAM cache fallback (volatile)
 #
 # ICON:
 #   SVG in hicolor/scalable/apps (user-space, no sudo).
@@ -56,6 +57,17 @@
 #     covered by TranslateUI in --disable-features.
 #   --enable-accelerated-video-decode : PRESENT — VA-API hardware decode on
 #     Pi 4 VideoCore VI. Pairs with UseChromeOSDirectVideoDecoder disabled.
+#   --password-store=basic : PRESENT — stops the GNOME keyring unlock prompt
+#     in the isolated profile. Saved passwords for this profile only are kept
+#     unencrypted on disk (same as Pi OS Bookworm). Copied from Better
+#     Chromium's "Disable keyring password prompt" option (pi-apps 17938ced).
+#     Ref: https://chromium.googlesource.com/chromium/src/+/main/docs/linux/password_storage.md
+#
+# RAM CACHE LOCATION (decided at every launch by the launcher):
+#   If /zram is a mounted zram device and writable (Pi-Apps "More RAM" app),
+#   cache goes to /zram/spotify-web-cache-$USER (compressed RAM). Otherwise
+#   /dev/shm/spotify-web-cache. Same detection as Better Chromium's
+#   "Reduce writes" script (pi-apps c98a30a1).
 #
 # FLAG REQUIREMENTS:
 #   --js-flags MUST be quoted: "--max-old-space-size=192 --optimize-for-size"
@@ -71,6 +83,10 @@
 #   --force-renderer-accessibility and --enable-remote-extensions.
 #
 # VERSION HISTORY:
+#   v1.5.7 (2026-11) — Added --password-store=basic (no keyring prompt).
+#     Launcher now uses /zram for the disk cache when the More RAM app's zram
+#     mount is present and writable, falling back to /dev/shm. Uninstall
+#     removes both cache locations. Both ideas from Botspot's Better Chromium.
 #   v1.5.6 (2026-06) -- Added optional desktop launcher pin prompt (y/N) on
 #     install, matching backlight/webapps pattern. write_desktop_launcher()
 #     writes to XDG_DESKTOP_DIR (~Desktop). Uninstall cleans it up.
@@ -92,7 +108,7 @@
 #   v1.2.0 — Initial stable release with RAM cache and embedded SVG icon.
 # =============================================================================
 
-SCRIPT_VERSION="1.5.6"
+SCRIPT_VERSION="1.5.7"
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[0;33m'
@@ -106,6 +122,7 @@ ICON_NAME="spotify-web"
 ICON_FILE="$ICON_DIR/${ICON_NAME}.svg"
 USER_DATA_DIR="$HOME/.config/webapps/spotify-web"
 RAM_CACHE_DIR="/dev/shm/spotify-web-cache"
+ZRAM_CACHE_DIR="/zram/spotify-web-cache-${USER}"
 XDG_DESKTOP_DIR="$(xdg-user-dir DESKTOP 2>/dev/null || echo "${HOME}/Desktop")"
 DESKTOP_LAUNCHER="${XDG_DESKTOP_DIR}/spotify-web.desktop"
 
@@ -165,7 +182,12 @@ write_launcher() {
     cat << EOF | sudo tee "$LAUNCHER" > /dev/null || { echo "Failed to create launcher"; exit 1; }
 #!/bin/bash
 mkdir -p "\$HOME/.config/webapps/spotify-web"
-mkdir -p "$RAM_CACHE_DIR"
+# Prefer the More RAM app's zram mount (compressed RAM); fall back to /dev/shm.
+CACHE_DIR="$RAM_CACHE_DIR"
+if [ -d /zram ] && [ -w /zram ] && zramctl -o MOUNTPOINT 2>/dev/null | grep -xq /zram; then
+    CACHE_DIR="/zram/spotify-web-cache-\$USER"
+fi
+mkdir -p "\$CACHE_DIR"
 exec chromium \
 --user-data-dir="\$HOME/.config/webapps/spotify-web" \
 --app=https://open.spotify.com \
@@ -174,7 +196,7 @@ exec chromium \
 --ozone-platform=wayland \
 --process-per-site \
 --renderer-process-limit=1 \
---disk-cache-dir=$RAM_CACHE_DIR \
+--disk-cache-dir="\$CACHE_DIR" \
 --disk-cache-size=20971520 \
 --media-cache-size=20971520 \
 --disable-gpu-shader-disk-cache \
@@ -208,6 +230,7 @@ exec chromium \
 --no-first-run \
 --no-default-browser-check \
 --disable-sync \
+--password-store=basic \
 --disable-features=TranslateUI,AutofillAssistant,GlobalMediaControls,ChromeLabs,UseChromeOSDirectVideoDecoder
 EOF
     sudo chmod +x "$LAUNCHER" || { echo "Failed to set launcher permissions"; exit 1; }
@@ -278,7 +301,8 @@ install_shortcut() {
     echo ""
     echo "  Optimizations active:"
     echo "    • Isolated Chromium profile — no session reuse"
-    echo "    • Cache in RAM (/dev/shm) — no SD writes"
+    echo "    • Cache in RAM (/zram if More RAM is installed, else /dev/shm)"
+    echo "    • No keyring password prompt (--password-store=basic)"
     echo "    • GPU shader/program cache disabled"
     echo "    • Crash reporting and telemetry disabled"
     echo "    • Animations and background activity suppressed"
@@ -296,7 +320,7 @@ uninstall_shortcut() {
     sudo rm -f "$DESKTOP_FILE" "$LAUNCHER"
     rm -f "$ICON_FILE"
     rm -f "${DESKTOP_LAUNCHER}"
-    rm -rf "$RAM_CACHE_DIR"
+    rm -rf "$RAM_CACHE_DIR" "$ZRAM_CACHE_DIR"
     sudo touch /usr/local/share/icons 2>/dev/null || true
     gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
     sudo update-desktop-database /usr/local/share/applications 2>/dev/null || true
